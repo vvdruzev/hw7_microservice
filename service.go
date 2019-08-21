@@ -8,7 +8,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
-	"google.golang.org/grpc/tap"
 	"log"
 	"net"
 	"strings"
@@ -21,25 +20,13 @@ import (
 
 type AdminServerManager struct {
 	*Manager
-	*ManagerStat
 }
 
 func NewAdminServerManager(manager *Manager) (*AdminServerManager) {
-	return &AdminServerManager{Manager:manager}
+	return &AdminServerManager{Manager: manager}
 }
 
 func (as *AdminServerManager) Logging(in *Nothing, stream Admin_LoggingServer) error {
-
-	md, _ := metadata.FromIncomingContext(stream.Context())
-	consumer := md["consumer"][0]
-	t := stream.Context().Value("method").(string)
-	as.ChangeEvent(&Event{Timestamp:time.Now().UnixNano(),Consumer: consumer, Method: t, Host: "127.0.0.1:"})
-	if !as.loggerFlag {
-		if err := stream.Send(as.Event); err != nil {
-			return err
-		}
-		as.loggerFlag = true
-	}
 	for {
 		ti := as.count
 		time.Sleep(1 * time.Millisecond)
@@ -49,52 +36,35 @@ func (as *AdminServerManager) Logging(in *Nothing, stream Admin_LoggingServer) e
 			}
 		}
 		if err := stream.Send(as.Event); err != nil {
-			fmt.Println("sdfsdfdf")
 			return err
 		}
 	}
 	return nil
 }
-
-func NewStat() Stat  {
-	return Stat{ByConsumer: map[string]uint64{},ByMethod: map[string]uint64{}}
-}
-
 
 func (as *AdminServerManager) Statistics(in *StatInterval, stream Admin_StatisticsServer) error {
-	//timer:=time.NewTimer(time.Second*time.Duration(in.IntervalSeconds))
-	//as.MsStat = *NewManagerStat()
-//	as.MsStat.ByConsumer = make(map[string]uint64)
-fmt.Println("-------",as.Stat)
-	start := time.Now()
-	fmt.Println(as.statFlag)
-	if !as.statFlag {
-		//as.Stat = Stat{ByConsumer: map[string]uint64{},ByMethod: map[string]uint64{}}
-		md, _ := metadata.FromIncomingContext(stream.Context())
-		consumer := md["consumer"][0]
-		method := stream.Context().Value("method").(string)
-		as.CounterMethod(method)
-		as.CounterConsumer(consumer)
-		as.statFlag  =true
-	}
-	fmt.Println(as.statFlag)
-
-	fmt.Println(as.Stat)
-	for  {
-		time.Sleep(time.Second*time.Duration(in.IntervalSeconds))
-
-		if err := stream.Send(&as.Stat); err != nil {
-			return err
+	m := NewStat()
+	c := time.Tick(time.Second * time.Duration(in.IntervalSeconds))
+	ti := as.count
+	for {
+		select {
+		case <-c:
+			if err := stream.Send(&m); err != nil {
+				return err
+			}
+			m = NewStat()
+			break
+		default:
+			if ti < as.count {
+				ti = as.count
+				//as.mu.Lock()
+				m.ByMethod[as.Event.Method]++
+				m.ByConsumer[as.Event.Consumer]++
+				//as.mu.Unlock()
+			}
 		}
-		fmt.Println(as.Stat)
-
-		//as.mu.Lock()
-		//as.Stat = &Stat{ByConsumer: map[string]uint64{},ByMethod: map[string]uint64{}}
-		//as.mu.Unlock()
-		fmt.Println(time.Since(start))
 	}
 	return nil
-
 }
 
 func (as *AdminServerManager) AdminStreamInterceptor1(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (error) {
@@ -107,9 +77,9 @@ func (as *AdminServerManager) AdminStreamInterceptor1(srv interface{}, ss grpc.S
 	if grpc.Code(err) != codes.OK {
 		return err
 	}
-	as.ManagerStat = NewManagerStat()
-	//as.Stat = &Stat{ByConsumer: map[string]uint64{},ByMethod:map[string]uint64{}}//NewStat()
-	//as.ByMethod = map[string]uint64{}
+
+	as.ChangeEvent(&Event{Timestamp: time.Now().UnixNano(), Consumer: consumer, Method: info.FullMethod, Host: "127.0.0.1:"})
+	as.CountIncrement()
 
 	err = handler(srv, ss)
 
@@ -118,44 +88,21 @@ func (as *AdminServerManager) AdminStreamInterceptor1(srv interface{}, ss grpc.S
 
 type BizServerManager struct {
 	*Manager
-	*ManagerStat
 }
 
 func NewBizServer(manager *Manager) *BizServerManager {
-	return &BizServerManager{Manager:manager}
+	return &BizServerManager{Manager: manager}
 }
 
 func (bz *BizServerManager) Check(ctx context.Context, in *Nothing) (*Nothing, error) {
-
-	md, _ := metadata.FromIncomingContext(ctx)
-	consumer := md["consumer"][0]
-	t := ctx.Value("method").(string)
-
-	bz.ChangeEvent(&Event{Timestamp:time.Now().UnixNano(),Consumer: consumer, Method: t, Host: "127.0.0.1:"})
-	bz.CountIncrement()
-
 	return &Nothing{}, nil
 }
+
 func (bz *BizServerManager) Add(ctx context.Context, in *Nothing) (*Nothing, error) {
-
-	md, _ := metadata.FromIncomingContext(ctx)
-	consumer := md["consumer"][0]
-	t := ctx.Value("method").(string)
-
-	bz.ChangeEvent(&Event{Timestamp:time.Now().UnixNano(),Consumer: consumer, Method: t, Host: "127.0.0.1:"})
-	bz.CountIncrement()
-
 	return &Nothing{}, nil
 }
 
 func (bz *BizServerManager) Test(ctx context.Context, in *Nothing) (*Nothing, error) {
-	md, _ := metadata.FromIncomingContext(ctx)
-	consumer := md["consumer"][0]
-	t := ctx.Value("method").(string)
-
-	bz.ChangeEvent(&Event{Timestamp:time.Now().UnixNano(),Consumer: consumer, Method: t, Host: "127.0.0.1:"})
-	bz.CountIncrement()
-
 	return &Nothing{}, nil
 }
 
@@ -168,98 +115,64 @@ func (bz *BizServerManager) BizUnaryInterceptor1(ctx context.Context, req interf
 	consumer := md["consumer"][0]
 	err := bz.AuthLogin(consumer, info.FullMethod)
 
-
-
 	if grpc.Code(err) != codes.OK {
 		return nil, err
 	}
 
-	bz.CounterMethod(info.FullMethod)
-	bz.CounterConsumer(consumer)
-
+	bz.ChangeEvent(&Event{Timestamp: time.Now().UnixNano(), Consumer: consumer, Method: info.FullMethod, Host: "127.0.0.1:"})
+	bz.CountIncrement()
 
 	reply, err := handler(ctx, req)
 
 	return reply, err
 }
 
-type ManagerStat struct {
-	Stat
-	mu *sync.Mutex
+func NewStat() Stat {
+	return Stat{ByConsumer: map[string]uint64{}, ByMethod: map[string]uint64{}}
 }
-
-func NewManagerStat() *ManagerStat  {
-	m:= make(map[string]uint64)
-	c:= make(map[string]uint64)
-	return &ManagerStat{Stat:Stat{ByMethod: m,ByConsumer:c}}
-}
-func (m *ManagerStat) CounterMethod(method string) {
-	//m.mu.Lock()
-	fmt.Println(method)
-
-	m.Stat.ByMethod[method]++
-	//m.mu.Unlock()
-}
-
-func (m *ManagerStat) CounterConsumer(consumer string) {
-//	m.mu.Lock()
-	fmt.Println(consumer)
-
-	m.Stat.ByConsumer[consumer]++
-//	m.mu.Unlock()
-
-}
-
 
 type Manager struct {
-	Event *Event
-	ACLData map[string]interface{}
-	mu *sync.Mutex
-	count int
-	loggerFlag bool
-	//Stat *Stat
-	statFlag bool
+	Event      *Event
+	ACLData    map[string][]string
+	mu         *sync.Mutex
+	count      int
 }
 
 func NewManager(acldata string) (*Manager, error) {
-	adata := make(map[string]interface{})
+	adata := make(map[string][]string)
 	err := json.Unmarshal([]byte(acldata), &adata)
 	if err != nil {
 		return nil, err
 	}
 	m := &sync.Mutex{}
-	//m:= make(map[string]int)
-	//b:= make(map[string]int)
 
-	return &Manager{ACLData: adata,loggerFlag:false, statFlag:false,mu:m}, nil
+	return &Manager{ACLData: adata, mu: m}, nil
 }
 
-func (m *Manager) CountIncrement()  {
+func (m *Manager) CountIncrement() {
 	m.mu.Lock()
 	m.count++
 	m.mu.Unlock()
 }
 
-func (m *Manager) ChangeEvent(event *Event)  {
+func (m *Manager) ChangeEvent(event *Event) {
 	m.mu.Lock()
 	m.Event = event
 	m.mu.Unlock()
 }
-func (m *Manager) CheckEvent() bool  {
+func (m *Manager) CheckEvent() bool {
 	return false
 }
 
-
-
 func (m Manager) AuthLogin(consumer string, method string) error {
 	if _, ok := m.ACLData[consumer]; ok {
-		methods, ok := m.ACLData[consumer].([]interface{})
+		methods, ok := m.ACLData[consumer]
 		if !ok {
 			return fmt.Errorf("Argument is not a slice")
 		}
 
 		for _, val := range methods {
-			v := strings.TrimRight(val.(string), "*")
+			v := strings.TrimRight(val, "*")
 			if strings.Contains(method, v) {
 				return status.Error(codes.OK, "authenticated ok")
 			}
@@ -275,8 +188,8 @@ func StartMyMicroservice(ctx context.Context, listenAddr string, ACLData string)
 	if err != nil {
 		return err
 	}
-	bizServer := NewBizServer(manager)
 
+	bizServer := NewBizServer(manager)
 	adminServer := NewAdminServerManager(manager)
 
 	go func() {
@@ -284,11 +197,11 @@ func StartMyMicroservice(ctx context.Context, listenAddr string, ACLData string)
 		if err != nil {
 			log.Fatalln("cant listet port", err)
 		}
-		server := grpc.NewServer(grpc.UnaryInterceptor(bizServer.BizUnaryInterceptor1), grpc.InTapHandle(rateLimiter), grpc.StreamInterceptor(adminServer.AdminStreamInterceptor1))
+		server := grpc.NewServer(grpc.UnaryInterceptor(bizServer.BizUnaryInterceptor1), grpc.StreamInterceptor(adminServer.AdminStreamInterceptor1))
 		RegisterBizServer(server, bizServer)
 		RegisterAdminServer(server, adminServer)
 		go server.Serve(lis)
-		fmt.Println("starting server at " + listenAddr)
+		//fmt.Println("starting server at " + listenAddr)
 
 		defer server.Stop()
 		defer lis.Close()
@@ -299,13 +212,5 @@ func StartMyMicroservice(ctx context.Context, listenAddr string, ACLData string)
 		}
 	}()
 	return nil
-}
-
-// -----
-
-func rateLimiter(ctx context.Context, info *tap.Info) (context.Context, error) {
-	ctx = context.WithValue(ctx, "method", info.FullMethodName)
-
-	return ctx, nil
 }
 
