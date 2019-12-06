@@ -13,10 +13,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"sync/atomic"
 )
 
-// тут вы пишете код
-// обращаю ваше внимание - в этом задании запрещены глобальные переменные
 
 type AdminServerManager struct {
 	*Manager
@@ -28,16 +27,17 @@ func NewAdminServerManager(manager *Manager) (*AdminServerManager) {
 
 func (as *AdminServerManager) Logging(in *Nothing, stream Admin_LoggingServer) error {
 	for {
-		ti := as.count
-		time.Sleep(1 * time.Millisecond)
+		ti := atomic.LoadInt32(&as.count)
 		for {
-			if ti < as.count {
+			if ti < atomic.LoadInt32(&as.count) {
 				break
 			}
 		}
+		as.mu.Lock()
 		if err := stream.Send(as.Event); err != nil {
 			return err
 		}
+		as.mu.Unlock()
 	}
 	return nil
 }
@@ -45,7 +45,7 @@ func (as *AdminServerManager) Logging(in *Nothing, stream Admin_LoggingServer) e
 func (as *AdminServerManager) Statistics(in *StatInterval, stream Admin_StatisticsServer) error {
 	m := NewStat()
 	c := time.Tick(time.Second * time.Duration(in.IntervalSeconds))
-	ti := as.count
+	ti := atomic.LoadInt32(&as.count)
 	for {
 		select {
 		case <-c:
@@ -55,12 +55,10 @@ func (as *AdminServerManager) Statistics(in *StatInterval, stream Admin_Statisti
 			m = NewStat()
 			break
 		default:
-			if ti < as.count {
-				ti = as.count
-				//as.mu.Lock()
+			if ti < atomic.LoadInt32(&as.count) {
+				ti = atomic.LoadInt32(&as.count)
 				m.ByMethod[as.Event.Method]++
 				m.ByConsumer[as.Event.Consumer]++
-				//as.mu.Unlock()
 			}
 		}
 	}
@@ -79,8 +77,7 @@ func (as *AdminServerManager) AdminStreamInterceptor1(srv interface{}, ss grpc.S
 	}
 
 	as.ChangeEvent(&Event{Timestamp: time.Now().UnixNano(), Consumer: consumer, Method: info.FullMethod, Host: "127.0.0.1:"})
-	as.CountIncrement()
-
+	atomic.AddInt32(&as.count,1)
 	err = handler(srv, ss)
 
 	return err
@@ -120,8 +117,7 @@ func (bz *BizServerManager) BizUnaryInterceptor1(ctx context.Context, req interf
 	}
 
 	bz.ChangeEvent(&Event{Timestamp: time.Now().UnixNano(), Consumer: consumer, Method: info.FullMethod, Host: "127.0.0.1:"})
-	bz.CountIncrement()
-
+	atomic.AddInt32(&bz.count,1)
 	reply, err := handler(ctx, req)
 
 	return reply, err
@@ -135,7 +131,7 @@ type Manager struct {
 	Event      *Event
 	ACLData    map[string][]string
 	mu         *sync.Mutex
-	count      int
+	count      int32
 }
 
 func NewManager(acldata string) (*Manager, error) {
@@ -149,19 +145,10 @@ func NewManager(acldata string) (*Manager, error) {
 	return &Manager{ACLData: adata, mu: m}, nil
 }
 
-func (m *Manager) CountIncrement() {
-	m.mu.Lock()
-	m.count++
-	m.mu.Unlock()
-}
-
 func (m *Manager) ChangeEvent(event *Event) {
 	m.mu.Lock()
 	m.Event = event
 	m.mu.Unlock()
-}
-func (m *Manager) CheckEvent() bool {
-	return false
 }
 
 func (m Manager) AuthLogin(consumer string, method string) error {
